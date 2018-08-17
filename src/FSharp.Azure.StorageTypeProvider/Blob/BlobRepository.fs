@@ -59,7 +59,7 @@ let internal listBlobsInternal (container : CloudBlobContainer) prefix includeSu
         (fun blobSegmentResult -> blobSegmentResult.Results)
         null    
 
-let listBlobs prefix incSubDirs (container:CloudBlobContainer)  = 
+let listBlobs incSubDirs (container:CloudBlobContainer) prefix = 
     listBlobsInternal container prefix incSubDirs
     |> Async.map
         (Seq.choose(function
