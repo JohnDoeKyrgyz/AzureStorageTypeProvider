@@ -63,22 +63,38 @@ type BlobFile internal (defaultConnectionString, container, file, getBlobRef : _
         this.BlobRef(connectionString).DownloadToFileAsync(path, FileMode.Create) |> Async.AwaitTask
     
     /// Opens this file as a stream for reading.
-    member this.OpenStream(?connectionString:string) = this.BlobRef(connectionString).OpenRead()
+    member this.OpenStreamAsync(?connectionString:string) = 
+        let accessConditions = new AccessCondition()
+        let options = new BlobRequestOptions()
+        let operationContext = new OperationContext()
+        this.BlobRef(connectionString).OpenReadAsync(accessConditions, options, operationContext) |> Async.AwaitTask
+
+    /// Opens this file as a stream for reading.
+    member this.OpenStream(?connectionString:string) = 
+        match connectionString with
+        | Some connectionString -> this.OpenStreamAsync(connectionString)
+        | None -> this.OpenStreamAsync()
+        |> Async.RunSynchronously
     
     /// Opens this file as a text stream for reading.
-    member this.OpenStreamAsText(?connectionString) =
+    member this.OpenStreamAsTextAsync(?connectionString) =
         match connectionString with
-        | Some connectionString -> new StreamReader(this.OpenStream(connectionString))
-        | None -> new StreamReader(this.OpenStream())
+        | Some connectionString -> this.OpenStreamAsync(connectionString)
+        | None -> this.OpenStreamAsync()
+        |> Async.map (fun stream -> new StreamReader(stream))
 
     /// Lazily read the contents of this blob a line at a time.
-    member this.ReadLines(?connectionString) = seq {
-        use stream =
+    member this.ReadLinesAsync(?connectionString) = async {
+        let! stream = 
             match connectionString with
-            | Some connectionString -> this.OpenStreamAsText(connectionString)
-            | None -> this.OpenStreamAsText()
-        while not stream.EndOfStream do
-            yield stream.ReadLine() }
+            | Some connectionString -> this.OpenStreamAsTextAsync(connectionString)
+            | None -> this.OpenStreamAsTextAsync()
+        return
+            seq {
+                use stream = stream
+                while not stream.EndOfStream do
+                    yield stream.ReadLine() } }
+        
   
     /// Fetches the latest metadata for the blob.
     member __.GetProperties(?connectionString) = async {
@@ -109,7 +125,7 @@ type BlockBlobFile internal (defaultConnectionString, container, file) =
     member __.AsCloudBlockBlob(?connectionString) = getBlobRef connectionString
 
     /// Reads this file as a string.
-    member __.Read(?connectionString) = (getBlobRef connectionString).DownloadText()
+    member __.Read(?connectionString) = (getBlobRef connectionString).DownloadTextAsync() |> Async.AwaitTask |> Async.RunSynchronously
     
     /// Reads this file as a string asynchronously.
     member __.ReadAsync(?connectionString) = getBlobRef(connectionString).DownloadTextAsync() |> Async.AwaitTask
@@ -171,13 +187,14 @@ module BlobBuilder =
         let container = getContainerRef (connectionString, container)
         let prefix = file + (prefix |> Option.toObj)
         listBlobs includeSubfolders container prefix
-        |> Seq.choose (function
+        |> Async.map
+            (Seq.choose (function
             | Blob(path, _, blobType, _) -> 
                 match blobType with
                 | BlobType.PageBlob -> (createPageBlobFile connectionString container.Name path) :> BlobFile 
                 | _ -> (createBlockBlobFile connectionString container.Name path) :> BlobFile 
                 |> Some
-            | _ -> None)
+            | _ -> None))
 
 /// Represents a pseudo-folder in blob storage.
 type BlobFolder internal (defaultConnectionString, container, file) = 
