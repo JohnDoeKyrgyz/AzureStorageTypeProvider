@@ -105,7 +105,7 @@ let internal getMetricsTables connection =
 
 type private DynamicQuery = TableQuery<DynamicTableEntity>
 
-let internal executeQuery (table : CloudTable) (query : TableQuery<'TEntity>)=
+let internal executeQueryInternal (table : CloudTable) (query : TableQuery<'TEntity>)=
     getAllSegments
         (fun token -> table.ExecuteQuerySegmentedAsync(query, token))
         (fun tableQuerySegment -> tableQuerySegment.ContinuationToken)
@@ -116,7 +116,7 @@ let internal executeQuery (table : CloudTable) (query : TableQuery<'TEntity>)=
 let internal getRowsForSchema (rowCount: int) connection tableName = 
     let table = getTable tableName connection
     let query = DynamicQuery().Take(Nullable rowCount)
-    executeQuery table query
+    executeQueryInternal table query
 
 let toLightweightTableEntity (dte:DynamicTableEntity) = 
     LightweightTableEntity (
@@ -158,7 +158,7 @@ let executeQuery connection tableName maxResults filterString =
     let query = DynamicQuery().Where(filterString)
     let query = if maxResults > 0 then query.Take(Nullable maxResults) else query
     let table = getTable tableName connection
-    executeQuery table query
+    executeQueryInternal table query
 
 let internal buildDynamicTableEntity(entity:LightweightTableEntity) =
     let tableEntity = DynamicTableEntity(entity.PartitionKey, entity.RowKey, ETag = "*")
@@ -362,7 +362,7 @@ let parseGetEntityResults results =
 let getEntity rowKey partitionKey connection tableName = 
     buildGetEntityQry rowKey partitionKey
     |> executeQuery connection tableName 0
-    |> parseGetEntityResults
+    |> Async.map parseGetEntityResults
 
 let getEntityAsync rowKey partitionKey connection tableName = async {
     let! results =
