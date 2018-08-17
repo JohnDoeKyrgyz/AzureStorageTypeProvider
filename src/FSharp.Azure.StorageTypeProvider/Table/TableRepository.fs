@@ -6,6 +6,8 @@ open FSharp.Azure.StorageTypeProvider.Table
 open Microsoft.WindowsAzure.Storage
 open Microsoft.WindowsAzure.Storage.Table
 open System
+open System.Threading.Tasks
+open Segment
 
 /// Suggests batch sizes based on a given entity type and published EDM property type sizes (source: https://msdn.microsoft.com/en-us/library/dd179338.aspx)
 module private BatchCalculator =
@@ -68,7 +70,12 @@ let internal getTable tableName connection =
 /// Gets all tables
 let internal getTables connection = 
     let client = getTableClient connection
-    client.ListTables() |> Seq.map(fun table -> table.Name)
+    getAllSegments 
+        client.ListTablesSegmentedAsync 
+        (fun tableResultSegment -> tableResultSegment.ContinuationToken)
+        (fun tableResultSegment -> tableResultSegment.Results :> seq<CloudTable>)
+        null
+    |> Async.map (Seq.map (fun table -> table.Name))
 
 let internal getMetricsTables connection =
     let client = getTableClient connection
@@ -76,30 +83,49 @@ let internal getMetricsTables connection =
     let locations = [ "Primary"; "Secondary" ]
     let periods = [ "Hourly", "Hour"; "Per Minute", "Minute" ]
 
-    seq {
-        for (description, period) in periods do
-            for location in locations do
-                for service in services do
-                    let tableName = sprintf "$Metrics%s%sTransactions%s" period location service
-                    if (client.GetTableReference(tableName).Exists()) then
-                        yield description, location, service, tableName }
+    async {
+        let! metricsTableRequests =
+            seq {
+                for (description, period) in periods do
+                    for location in locations do
+                        for service in services do
+                            let tableName = sprintf "$Metrics%s%sTransactions%s" period location service
+                            yield 
+                                async {
+                                    let! exists = client.GetTableReference(tableName).ExistsAsync() |> Async.AwaitTask
+                                    return
+                                        if exists then Some (description, location, service, tableName)
+                                        else None } }
+            |> Async.Parallel
+
+        let metricsTables = metricsTableRequests |> Seq.filter Option.isSome |> Seq.map Option.get
+        return metricsTables
+    }
+    
 
 type private DynamicQuery = TableQuery<DynamicTableEntity>
 
+let internal executeQuery (table : CloudTable) (query : TableQuery<'TEntity>)=
+    getAllSegments
+        (fun token -> table.ExecuteQuerySegmentedAsync(query, token))
+        (fun tableQuerySegment -> tableQuerySegment.ContinuationToken)
+        (fun tableQuerySegment -> tableQuerySegment.Results :> seq<'TEntity>)
+        null
+    |> Async.map Seq.toArray
+
 let internal getRowsForSchema (rowCount: int) connection tableName = 
     let table = getTable tableName connection
-    table.ExecuteQuery(DynamicQuery().Take(Nullable rowCount))
-    |> Seq.truncate rowCount
-    |> Seq.toArray
+    let query = DynamicQuery().Take(Nullable rowCount)
+    executeQuery table query
 
 let toLightweightTableEntity (dte:DynamicTableEntity) = 
-    LightweightTableEntity(
-                    Partition dte.PartitionKey,
-                    Row dte.RowKey,
-                    dte.Timestamp,
-                    dte.Properties
-                    |> Seq.map(fun p -> p.Key, p.Value.PropertyAsObject)
-                    |> Map.ofSeq)
+    LightweightTableEntity (
+        Partition dte.PartitionKey,
+        Row dte.RowKey,
+        dte.Timestamp,
+        dte.Properties
+        |> Seq.map(fun p -> p.Key, p.Value.PropertyAsObject)
+        |> Map.ofSeq)
 
 let executeGenericQueryAsync connection tableName maxResults filterString mapToReturnEntity = async {
     let query =
@@ -131,10 +157,8 @@ let executeQueryAsync connection tableName maxResults filterString =
 let executeQuery connection tableName maxResults filterString = 
     let query = DynamicQuery().Where(filterString)
     let query = if maxResults > 0 then query.Take(Nullable maxResults) else query
-
-    (getTable tableName connection).ExecuteQuery(query)
-    |> Seq.map(toLightweightTableEntity)
-    |> Seq.toArray
+    let table = getTable tableName connection
+    executeQuery table query
 
 let internal buildDynamicTableEntity(entity:LightweightTableEntity) =
     let tableEntity = DynamicTableEntity(entity.PartitionKey, entity.RowKey, ETag = "*")
@@ -215,13 +239,26 @@ let internal executeBatchAsynchronously batchOp entityBatch buildEntityId (table
     | AggregationError [] -> failwith "An unknown error occurred."
     | AggregationError (topException :: _) -> raise topException)
 
-let internal executeBatchSyncronously batchOp entityBatch buildEntityId (table:CloudTable) =
-    try 
-    batchOp
-    |> table.ExecuteBatch
-    |> Seq.zip entityBatch
-    |> Seq.map(fun (entity, res) -> SuccessfulResponse(buildEntityId entity, res.HttpStatusCode))
-    with :? StorageException as ex -> processErrorResp entityBatch buildEntityId ex
+let internal executeBatch batchOp entityBatch buildEntityId (table:CloudTable) =
+    async {
+        let! batchResults =
+            batchOp
+            |> table.ExecuteBatchAsync
+            |> Async.AwaitTask
+            |> Async.map (fun tableResults ->
+                tableResults
+                |> Seq.zip entityBatch
+                |> Seq.map(fun (entity, res) -> SuccessfulResponse(buildEntityId entity, res.HttpStatusCode)))
+            |> Async.Catch
+
+        return
+            match batchResults with
+            | Choice1Of2 results -> results
+            | Choice2Of2 ex ->
+                match ex with
+                | :? StorageException as storageException -> processErrorResp entityBatch buildEntityId storageException
+                | otherException -> raise otherException }
+    
 
 let internal executeBatchOperationAsync createTableOp (table:CloudTable) entities = async {
     return!
@@ -235,11 +272,13 @@ let internal executeBatchOperationAsync createTableOp (table:CloudTable) entitie
 let internal executeBatchOperation createTableOp (table:CloudTable) entities =
     entities
     |> splitIntoBatches createTableOp
-    |> Seq.toArray
-    |> Array.Parallel.map(fun (partitionKey, entityBatch, batchOperation) ->
+    |> Seq.map (fun (partitionKey, entityBatch, batchOperation) ->
         let buildEntityId (entity:DynamicTableEntity) = Partition(entity.PartitionKey), Row(entity.RowKey)
-        let responses = executeBatchSyncronously batchOperation entityBatch buildEntityId table
-        partitionKey, responses |> Seq.toArray)
+        async{
+            let! responses = executeBatch batchOperation entityBatch buildEntityId table
+            return partitionKey, responses |> Seq.toArray
+        })
+    |> Async.Parallel
 
 let deleteEntities connection tableName entities =
     let table = getTable tableName connection
@@ -254,8 +293,14 @@ let deleteEntitiesAsync connection tableName entities = async {
         |> Array.map buildDynamicTableEntity
         |> executeBatchOperationAsync TableOperation.Delete table }
 
-let deleteEntity connection tableName entity =
-    deleteEntities connection tableName [| entity |] |> Seq.head |> snd |> Seq.head
+let internal getSingleBatchResult batchResult =
+    match batchResult with
+    | [|_, [|response; _|]; _|] -> response
+    | unexpectedResponse -> failwithf "Unexpected batch result [%A]" unexpectedResponse
+
+let deleteEntity connection tableName entity = 
+    deleteEntities connection tableName [| entity |]
+    |> Async.map getSingleBatchResult
 
 let deleteEntityAsync connection tableName entity = async {
     let! resp = deleteEntitiesAsync connection tableName [| entity |] 
@@ -277,7 +322,8 @@ let insertEntityBatch connection tableName insertMode entities =
     |> executeBatchOperation insertOp table
 
 let insertEntity connection tableName insertMode entity = 
-    insertEntityBatch connection tableName insertMode [entity] |> Seq.head |> snd |> Seq.head
+    insertEntityBatch connection tableName insertMode [entity]
+    |> Async.map getSingleBatchResult
 
 let insertEntityAsync connection tableName insertMode entity = async {
     let! resp = insertEntityBatchAsync connection tableName insertMode [entity] 

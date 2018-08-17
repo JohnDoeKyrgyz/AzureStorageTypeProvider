@@ -13,6 +13,23 @@ module Async =
             return mapper result }
 
 ///[omit]
+module Segment =
+    let rec getAllSegments getSegment getContinuationToken getResults token =
+        async {
+            let! segmentResult = getSegment token |> Async.AwaitTask
+            let! results =
+                let continuationToken = getContinuationToken segmentResult
+                let results = getResults segmentResult
+                if continuationToken <> null then
+                    async {
+                        let! nextResult = getAllSegments getSegment getContinuationToken getResults continuationToken
+                        return results |> Seq.append nextResult
+                    }                    
+                else async {return results}
+                    
+            return results }
+
+///[omit]
 [<RequireQualifiedAccess>]
 [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]
 module Json =
