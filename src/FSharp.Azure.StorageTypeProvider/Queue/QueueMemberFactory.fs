@@ -10,31 +10,37 @@ let private createPeekForQueue (connectionString, domainType:ProvidedTypeDefinit
     let peekType = ProvidedTypeDefinition(sprintf "%s.Queues.%s.Peek" connectionString queueName, None, hideObjectMethods = true)
     domainType.AddMember peekType
     peekType.AddMembersDelayed(fun () ->
-        let messages = peekMessages connectionString queueName 32
-        messages
-        |> Seq.map(fun msg ->
-            let messageType = ProvidedTypeDefinition(sprintf "%s.Queues.%s.Peek.%s" connectionString queueName msg.Id, None, hideObjectMethods = true)
-            domainType.AddMember messageType
-            messageType.AddMembersDelayed(fun () ->
-                let contents = msg.AsString
-                let contentsProp =
-                    let out = String(msg.AsString.ToCharArray() |> Seq.truncate 32 |> Seq.toArray)
-                    if contents.Length <= 32 then out
-                    else out + "..."
+        async {
+            let! messages = peekMessages connectionString queueName 32
+            return
+                messages
+                |> Seq.map(fun msg ->
+                    let messageType = ProvidedTypeDefinition(sprintf "%s.Queues.%s.Peek.%s" connectionString queueName msg.Id, None, hideObjectMethods = true)
+                    domainType.AddMember messageType
+                    messageType.AddMembersDelayed(fun () ->
+                        let contents = msg.AsString
+                        let contentsProp =
+                            let out = String(msg.AsString.ToCharArray() |> Seq.truncate 32 |> Seq.toArray)
+                            if contents.Length <= 32 then out
+                            else out + "..."
 
-                let dequeueCount = msg.DequeueCount
-                let inserted = msg.InsertionTime.ToString()
-                let expires = msg.ExpirationTime.ToString()
-                let id = msg.Id
+                        let dequeueCount = msg.DequeueCount
+                        let inserted = msg.InsertionTime.ToString()
+                        let expires = msg.ExpirationTime.ToString()
+                        let id = msg.Id
 
-                [ ProvidedProperty(sprintf "Id: %s" msg.Id, typeof<string>, getterCode = (fun _ -> <@@ id @@>))
-                  ProvidedProperty(sprintf "Contents: '%s'" contentsProp, typeof<string>, getterCode = (fun _ -> <@@ contents @@>))
-                  ProvidedProperty(sprintf "Dequeued %d times" msg.DequeueCount, typeof<int>, getterCode = (fun _ -> <@@ dequeueCount @@>))
-                  ProvidedProperty(sprintf "Inserted on %A" msg.InsertionTime, typeof<string>, getterCode = (fun _ -> <@@ inserted @@>))
-                  ProvidedProperty(sprintf "Expires at %A" msg.ExpirationTime, typeof<string>, getterCode = (fun _ -> <@@ expires @@>))
-                ])
-            ProvidedProperty(sprintf "%s (%s)" (String(msg.AsString.ToCharArray() |> Seq.truncate 32 |> Seq.toArray)) msg.Id, messageType, getterCode = (fun _ -> <@@ () @@>)))
-        |> Seq.toList)
+                        [ ProvidedProperty(sprintf "Id: %s" msg.Id, typeof<string>, getterCode = (fun _ -> <@@ id @@>))
+                          ProvidedProperty(sprintf "Contents: '%s'" contentsProp, typeof<string>, getterCode = (fun _ -> <@@ contents @@>))
+                          ProvidedProperty(sprintf "Dequeued %d times" msg.DequeueCount, typeof<int>, getterCode = (fun _ -> <@@ dequeueCount @@>))
+                          ProvidedProperty(sprintf "Inserted on %A" msg.InsertionTime, typeof<string>, getterCode = (fun _ -> <@@ inserted @@>))
+                          ProvidedProperty(sprintf "Expires at %A" msg.ExpirationTime, typeof<string>, getterCode = (fun _ -> <@@ expires @@>))
+                        ])
+                    ProvidedProperty(sprintf "%s (%s)" (String(msg.AsString.ToCharArray() |> Seq.truncate 32 |> Seq.toArray)) msg.Id, messageType, getterCode = (fun _ -> <@@ () @@>)))
+                |> Seq.toList
+        }
+        |> Async.RunSynchronously)
+
+        
     peekType
 
 let createQueueMemberType connectionString (domainType:ProvidedTypeDefinition) queueName =
@@ -53,8 +59,10 @@ let getQueueStorageMembers (connectionString, domainType : ProvidedTypeDefinitio
     queueListingType.AddMembersDelayed(fun () ->
         connectionString
         |> getQueues
-        |> List.map (createQueueMember >> fun (name, queueType) ->
-            ProvidedProperty(name, queueType, getterCode = fun _ -> <@@ ProvidedQueue(connectionString, name) @@> )))
+        |> Async.map
+            (List.map (createQueueMember >> fun (name, queueType) ->
+                ProvidedProperty(name, queueType, getterCode = fun _ -> <@@ ProvidedQueue(connectionString, name) @@> )))
+        |> Async.RunSynchronously)
     domainType.AddMember queueListingType
     queueListingType.AddMember(ProvidedProperty("CloudQueueClient", typeof<CloudQueueClient>, getterCode = (fun _ -> <@@ QueueBuilder.getQueueClient connectionString @@>)))
     let queueListingProp = ProvidedProperty("Queues", queueListingType, isStatic = true, getterCode = (fun _ -> <@@ () @@>))

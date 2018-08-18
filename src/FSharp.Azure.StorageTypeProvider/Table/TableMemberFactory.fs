@@ -33,7 +33,9 @@ let getTableStorageMembers optionalStaticSchema schemaInferenceRowCount humanize
                 let! tables = getTables connectionString
                 return
                     [for table in tables do
-                        let schema = TableEntityMemberFactory.generateSchema table schemaInferenceRowCount connectionString
+                        let schema = 
+                            TableEntityMemberFactory.generateSchema table schemaInferenceRowCount connectionString
+                            |> Async.RunSynchronously
                         yield createTableType schema connectionString table table]
             }
             |> Async.RunSynchronously)
@@ -49,7 +51,9 @@ let getTableStorageMembers optionalStaticSchema schemaInferenceRowCount humanize
                         domainType.AddMember metricsTablesType
 
                         for (period, theLocation, service, tableName) in metrics do
-                            let schema = TableEntityMemberFactory.generateSchema tableName schemaInferenceRowCount connectionString
+                            let schema = 
+                                TableEntityMemberFactory.generateSchema tableName schemaInferenceRowCount connectionString
+                                |> Async.RunSynchronously
                             createTableType schema connectionString tableName (sprintf "%s %s metrics (%s)" period service theLocation)
                             |> metricsTablesType.AddMember
 

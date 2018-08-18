@@ -6,6 +6,7 @@ open Microsoft.WindowsAzure.Storage
 open Microsoft.WindowsAzure.Storage.Table
 open System
 open System.Reflection
+open Segment
 
 /// Represents a Table in Azure.
 type AzureTable internal (defaultConnection, tableName) = 
@@ -67,9 +68,7 @@ type AzureTable internal (defaultConnection, tableName) =
     member this.Insert(partitionKey, rowKey, entity, ?insertMode, ?connectionString) = 
         let insertMode, connectionString = getConnectionDetails (insertMode, connectionString)
         this.Insert([ partitionKey, rowKey, entity ], insertMode, connectionString)
-        |> Seq.head
-        |> snd
-        |> Seq.head
+        |> Async.map getSingleBatchResult
 
     /// Inserts a single entity into the table asynchronously, using public properties on the object as fields.
     member this.InsertAsync(partitionKey, rowKey, entity, ?insertMode, ?connectionString) = async {
@@ -104,11 +103,20 @@ type AzureTable internal (defaultConnection, tableName) =
         let table = getTableForConnection (defaultArg connectionString defaultConnection)
         let filter = Table.TableQuery.GenerateFilterCondition ("PartitionKey", Table.QueryComparisons.Equal, partitionKey)
 
-        (new Table.TableQuery<Table.DynamicTableEntity>()).Where(filter).Select [| "RowKey" |]
-        |> table.ExecuteQuery
-        |> Seq.map(fun e -> (Partition e.PartitionKey, Row e.RowKey))
-        |> __.Delete
-        |> getSinglePartitionResult partitionKey
+        let query = (new Table.TableQuery<Table.DynamicTableEntity>()).Where(filter).Select [| "RowKey" |]
+        let deleteSegment (entities : DynamicTableEntity seq)= 
+            entities
+            |> Seq.map(fun e -> (Partition e.PartitionKey, Row e.RowKey))
+            |> __.Delete
+
+        mapSegments
+            (fun token -> table.ExecuteQuerySegmentedAsync(query, token))
+            (fun tableQuerySegment -> tableQuerySegment.ContinuationToken)
+            (fun tableQuerySegment -> tableQuerySegment.Results)
+            deleteSegment
+            null
+            |> Async.map Seq.concat
+        
  
     /// Asynchronously deletes an entire partition from the table
     member __.DeletePartitionAsync(partitionKey, ?connectionString) = async {

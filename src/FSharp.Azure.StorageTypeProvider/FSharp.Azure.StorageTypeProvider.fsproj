@@ -39,8 +39,5 @@
     <None Include="App.config" />
     <Content Include="paket.references" />
   </ItemGroup>
-  <ItemGroup>
-    <Reference Include="System.Configuration" />
-  </ItemGroup>
   <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>

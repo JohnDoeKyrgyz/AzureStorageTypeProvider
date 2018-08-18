@@ -5,6 +5,7 @@ open Microsoft.WindowsAzure.Storage
 open Microsoft.WindowsAzure.Storage.Queue
 open ProviderImplementation.ProvidedTypes
 open System
+open System.Text
 
 /// The unique identifier for this Azure queue message.
 type MessageId = | MessageId of string
@@ -74,12 +75,23 @@ type ProvidedQueue(defaultConnectionString, name) =
     member __.AsCloudQueue(?connectionString) = getQueue connectionString
 
     /// Gets the queue length.
-    member __.GetCurrentLength(?connectionString) = 
+    member __.GetCurrentLengthAsync(?connectionString) = 
         let queueRef = getQueue connectionString
-        queueRef.FetchAttributes()
-        queueRef.ApproximateMessageCount
-        |> Option.ofNullable
-        |> defaultArg <| 0
+        async {
+            do! queueRef.FetchAttributesAsync() |> Async.AwaitTask
+            return
+                queueRef.ApproximateMessageCount
+                |> Option.ofNullable
+                |> defaultArg <| 0 }
+    
+    /// Gets the queue length.
+    member this.GetCurrentLength(?connectionString) = 
+        match connectionString with
+        | Some connectionString ->
+            this.GetCurrentLengthAsync(connectionString)
+        | None ->
+            this.GetCurrentLengthAsync()
+        |> Async.RunSynchronously
     
     /// Dequeues the next message and optionally sets the visibility timeout (i.e. how long you can work with the message before it reappears in the queue)
     member __.Dequeue(?connectionString, ?visibilityTimeout) = 
@@ -115,8 +127,9 @@ type ProvidedQueue(defaultConnectionString, name) =
         connectionString |> enqueue (CloudQueueMessage(content))
     
     /// Enqueues a new message.
-    member __.Enqueue(content : byte array, ?connectionString) = 
-        connectionString |> enqueue (CloudQueueMessage(content))
+    member __.Enqueue(content : byte array, ?connectionString) =
+        let contentAsString = Encoding.UTF32.GetString(content)
+        connectionString |> enqueue (CloudQueueMessage(contentAsString))
     
     /// Deletes an existing message.
     member __.DeleteMessage(providedMessageId, ?connectionString) = 

@@ -29,6 +29,21 @@ module Segment =
                     
             return results }
 
+    let rec mapSegments getSegment getContinuationToken getResults mapper token =
+        async {
+            let! segmentResult = getSegment token |> Async.AwaitTask
+            let continuationToken = getContinuationToken segmentResult
+            let results = getResults segmentResult
+            let! mappedResults = mapper results
+            let! results =                 
+                if continuationToken <> null then
+                    async {
+                        let! nextResult = mapSegments getSegment getContinuationToken getResults mapper continuationToken
+                        return mappedResults :: nextResult
+                    }
+                else async {return [mappedResults]} 
+            return results}
+
 ///[omit]
 [<RequireQualifiedAccess>]
 [<CompilationRepresentation(CompilationRepresentationFlags.ModuleSuffix)>]

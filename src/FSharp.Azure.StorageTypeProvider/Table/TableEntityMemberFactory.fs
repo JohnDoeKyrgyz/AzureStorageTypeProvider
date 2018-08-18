@@ -122,8 +122,7 @@ let setPropertiesForEntity humanize (entityType : ProvidedTypeDefinition) column
 let generateSchema tableName schemaInferenceRowCount connection =
     let sampleEntities = tableName |> getRowsForSchema schemaInferenceRowCount connection
     sampleEntities
-    |> Seq.map getPropsForEntity
-    |> toDistinctColumnDefinitions
+    |> Async.map (Seq.map getPropsForEntity >> toDistinctColumnDefinitions)
 
 /// Gets all the members for a Table Entity type
 let buildTableEntityMembers columnDefinitions humanize (parentTableType:ProvidedTypeDefinition, parentTableEntityType:ProvidedTypeDefinition, domainType:ProvidedTypeDefinition, connection, tableName) = 
