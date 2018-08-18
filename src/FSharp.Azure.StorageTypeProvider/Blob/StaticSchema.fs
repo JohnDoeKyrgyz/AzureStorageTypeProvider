@@ -23,18 +23,21 @@ let rec buildBlobItem prevPath (elementName, contents) =
         Blob (prevPath + elementName, elementName, blobType, None)
     | Folder, Json.ObjectOrNull children ->
         let path = prevPath + elementName
-        Folder (path, elementName, lazy (children |> Array.map (buildBlobItem path)))
+        Folder (path, elementName, async{ return (children |> Array.map (buildBlobItem path))} )
     | _ -> failInvalidJson()
 
 let buildBlobSchema (json:Json.Json) =
     json.AsObject
-    |> Array.map (fun (containerName, containerElements) ->
-        { Name = containerName
-          Contents =
-              lazy
-                  match containerElements with
-                  | Json.ObjectOrNull elements -> elements |> Seq.map (buildBlobItem "")
-                  | _ -> failInvalidJson() })
+    |> Array.map 
+        (fun (containerName, containerElements) ->
+            let contents =
+                async {
+                    return
+                        match containerElements with
+                        | Json.ObjectOrNull elements -> elements |> Array.map (buildBlobItem "")
+                        | _ -> failInvalidJson()
+                    }
+            { Name = containerName; Contents = contents })
     |> Array.toList
 
 let createSchema resolutionFolder path =

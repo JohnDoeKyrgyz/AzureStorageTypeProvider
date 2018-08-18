@@ -11,10 +11,10 @@ let rec private createBlobItem (domainType : ProvidedTypeDefinition) connectionS
     | Folder(path, name, contents) ->
         let folderProp = ProvidedTypeDefinition((sprintf "%s.%s" containerName path), Some typeof<BlobFolder>, hideObjectMethods = true)
         domainType.AddMember(folderProp)
-        folderProp.AddMembersDelayed(fun _ -> 
-            (contents.Value
-             |> Array.choose (createBlobItem domainType connectionString containerName)
-             |> Array.toList))
+        folderProp.AddMembersDelayed(fun _ ->
+            contents
+            |> Async.map (Array.choose (createBlobItem domainType connectionString containerName) >> Array.toList)
+            |> Async.RunSynchronously)
         Some <| ProvidedProperty(name, folderProp, getterCode = fun _ -> <@@ ContainerBuilder.createBlobFolder connectionString containerName path @@>)
     | Blob(path, name, blobType, length) -> 
         match blobType, length with
@@ -31,10 +31,10 @@ let rec private createBlobItem (domainType : ProvidedTypeDefinition) connectionS
 let private createContainerType (domainType : ProvidedTypeDefinition) connectionString (container : LightweightContainer) = 
     let individualContainerType = ProvidedTypeDefinition(container.Name + "Container", Some typeof<BlobContainer>, hideObjectMethods = true)
     individualContainerType.AddXmlDoc <| sprintf "Provides access to the '%s' container." container.Name
-    individualContainerType.AddMembersDelayed(fun _ -> 
-        (container.Contents.Value
-         |> Seq.choose (createBlobItem domainType connectionString container.Name)
-         |> Seq.toList))
+    individualContainerType.AddMembersDelayed(fun _ ->
+        container.Contents
+        |> Async.map (Array.choose (createBlobItem domainType connectionString container.Name) >> Array.toList)
+        |> Async.RunSynchronously)
     domainType.AddMember(individualContainerType)
     // this local binding is required for the quotation.
     let containerName = container.Name
@@ -49,7 +49,11 @@ let getBlobStorageMembers staticSchema (connectionString, domainType : ProvidedT
     let createContainerType = createContainerType domainType connectionString
     
     match staticSchema with
-    | [] -> containerListingType.AddMembersDelayed(fun _ -> connectionString |> getBlobStorageAccountManifest |> List.map createContainerType)
+    | [] -> containerListingType.AddMembersDelayed(fun _ -> 
+        connectionString 
+        |> getBlobStorageAccountManifest 
+        |> Async.map (Seq.map createContainerType >> Seq.toList) 
+        |> Async.RunSynchronously)
     | staticSchema -> staticSchema |> List.map createContainerType |> containerListingType.AddMembers
     
     domainType.AddMember containerListingType
