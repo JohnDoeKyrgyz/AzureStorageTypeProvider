@@ -27,29 +27,38 @@ let getTableStorageMembers optionalStaticSchema schemaInferenceRowCount humanize
         |> Array.map(fun table -> createTableType table.Columns connectionString table.Table table.Table)
         |> Array.toList
         |> tableListingType.AddMembers
-    | None ->
+    | None ->        
         tableListingType.AddMembersDelayed(fun _ ->
-            getTables connectionString
-            |> Seq.map (fun table ->
-                let schema = TableEntityMemberFactory.generateSchema table schemaInferenceRowCount connectionString
-                createTableType schema connectionString table table)
-            |> Seq.toList)
+            async {
+                let! tables = getTables connectionString
+                return
+                    [for table in tables do
+                        let schema = TableEntityMemberFactory.generateSchema table schemaInferenceRowCount connectionString
+                        yield createTableType schema connectionString table table]
+            }
+            |> Async.RunSynchronously)
+        
+        tableListingType.AddMembersDelayed(fun _ ->
+            async {
+                // Get any metrics tables that are available
+                let! metrics = getMetricsTables connectionString    
+                return
+                    if metrics <> Seq.empty then
+                
+                        let metricsTablesType = ProvidedTypeDefinition("$Azure_Metrics", Some typeof<obj>, hideObjectMethods = true)
+                        domainType.AddMember metricsTablesType
 
-        // Get any metrics tables that are available
-        let metrics = getMetricsTables connectionString    
-        if metrics <> Seq.empty then
-            tableListingType.AddMembersDelayed(fun _ ->
-                let metricsTablesType = ProvidedTypeDefinition("$Azure_Metrics", Some typeof<obj>, hideObjectMethods = true)
-                domainType.AddMember metricsTablesType
+                        for (period, theLocation, service, tableName) in metrics do
+                            let schema = TableEntityMemberFactory.generateSchema tableName schemaInferenceRowCount connectionString
+                            createTableType schema connectionString tableName (sprintf "%s %s metrics (%s)" period service theLocation)
+                            |> metricsTablesType.AddMember
 
-                for (period, theLocation, service, tableName) in metrics do
-                    let schema = TableEntityMemberFactory.generateSchema tableName schemaInferenceRowCount connectionString
-                    createTableType schema connectionString tableName (sprintf "%s %s metrics (%s)" period service theLocation)
-                    |> metricsTablesType.AddMember
-
-                let metricsTablesProp = ProvidedProperty("Azure Metrics", metricsTablesType, getterCode = (fun _ -> <@@ () @@>))
-                metricsTablesProp.AddXmlDoc "Provides access to metrics tables populated by Azure that are available on this storage account."
-                [ metricsTablesProp ])
+                        let metricsTablesProp = ProvidedProperty("Azure Metrics", metricsTablesType, getterCode = (fun _ -> <@@ () @@>))
+                        metricsTablesProp.AddXmlDoc "Provides access to metrics tables populated by Azure that are available on this storage account."
+                        [ metricsTablesProp ]
+                    else []}
+            |> Async.RunSynchronously)
+        
 
     let ctcProp = ProvidedProperty("CloudTableClient", typeof<CloudTableClient>, getterCode = (fun _ -> <@@ TableBuilder.createAzureTableRoot connectionString @@>))
     ctcProp.AddXmlDoc "Gets a handle to the Table Azure SDK client for this storage account."
